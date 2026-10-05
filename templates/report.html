@@ -26,17 +26,14 @@
   <h2>Contributions per day</h2>
   <img src="data:image/png;base64,{{ chart_b64 }}" alt="Daily contributions chart" class="chart">
 
-  <h2>Contributors
-    {% if not standalone %}
-    <span class="toggle">
-      {% if show_details %}
-      <a href="{{ url_for('report') }}">Hide names and amounts</a>
-      {% else %}
-      <a href="{{ url_for('report', details='shown') }}">Show names and amounts</a>
-      {% endif %}
-    </span>
-    {% endif %}
-  </h2>
+  <h2>Contributors</h2>
+  {% if not standalone %}
+  <form action="{{ url_for('report') }}" method="post" class="inline-form">
+    <input type="hidden" name="payload" value='{{ payload|e }}'>
+    <input type="hidden" name="details" value="{{ 'hidden' if show_details else 'shown' }}">
+    <button type="submit" class="btn small">{{ "Hide names and amounts" if show_details else "Show names and amounts" }}</button>
+  </form>
+  {% endif %}
   {% if not show_details %}
   <p class="muted">Privacy mode is on: names and amounts are hidden.</p>
   {% endif %}
@@ -62,8 +59,18 @@
 
   {% if not standalone %}
   <div class="actions">
-    <a class="btn" href="{{ url_for('download', format='pdf', details='shown' if show_details else 'hidden') }}">Download PDF</a>
-    <a class="btn" href="{{ url_for('download', format='html', details='shown' if show_details else 'hidden') }}">Download HTML</a>
+    <form action="{{ url_for('download') }}" method="post" class="inline-form">
+      <input type="hidden" name="payload" value='{{ payload|e }}'>
+      <input type="hidden" name="format" value="pdf">
+      <input type="hidden" name="details" value="{{ 'shown' if show_details else 'hidden' }}">
+      <button type="submit" class="btn">Download PDF</button>
+    </form>
+    <form action="{{ url_for('download') }}" method="post" class="inline-form">
+      <input type="hidden" name="payload" value='{{ payload|e }}'>
+      <input type="hidden" name="format" value="html">
+      <input type="hidden" name="details" value="{{ 'shown' if show_details else 'hidden' }}">
+      <button type="submit" class="btn">Download HTML</button>
+    </form>
     <a class="btn secondary" href="{{ url_for('index') }}">Upload another file</a>
   </div>
   {% endif %}

@@ -6,6 +6,10 @@ A small Flask tool. Upload a CSV of contributions, get a summary report with
 totals, progress toward a target, a per-day chart, and an optional privacy
 mode that hides donor names and amounts. Reports download as PDF or HTML.
 
+The app is fully stateless: parsed data travels in hidden form fields between
+requests, so it runs on serverless platforms (Vercel) as well as normal
+servers. Nothing is stored on the server.
+
 CSV format (header row required):
     name,amount,date
     Ahmed Khan,5000,2026-09-15
@@ -18,19 +22,21 @@ Run locally:
 import csv
 import io
 import os
+import json
 import base64
-import secrets
-from datetime import datetime
+import hashlib
+from datetime import datetime, date
 
 import matplotlib
 matplotlib.use("Agg")  # headless rendering, no display needed
 import matplotlib.pyplot as plt
 
 from flask import (
-    Flask, request, render_template, redirect,
-    url_for, session, send_file, abort,
+    Flask, request, render_template,
+    send_file, abort,
 )
 from dotenv import load_dotenv
+from cryptography.fernet import Fernet, InvalidToken
 
 load_dotenv()
 
@@ -42,10 +48,6 @@ DEFAULT_TARGET = float(os.environ.get("TARGET_AMOUNT", "100000"))
 
 REQUIRED_COLUMNS = ["name", "amount", "date"]
 DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y/%m/%d")
-
-# In-memory store: token -> parsed data. Fine for a small single-worker tool.
-# Limitation: data is lost on restart and not shared across workers.
-STORE = {}
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +134,48 @@ def parse_csv(file_stream):
         donations.append({"name": name, "amount": amount, "date": parsed_date})
 
     return donations, errors
+
+
+# ---------------------------------------------------------------------------
+# Payload encode/decode (stateless transport between requests)
+#
+# The payload carries donor names and amounts between requests in hidden form
+# fields. It is encrypted with Fernet (key derived from SECRET_KEY) so names
+# and amounts are not visible even in the page source, and tampering is
+# rejected.
+# ---------------------------------------------------------------------------
+def _fernet():
+    key = base64.urlsafe_b64encode(hashlib.sha256(
+        app.secret_key.encode("utf-8")).digest())
+    return Fernet(key)
+
+
+def encode_payload(donations, errors, target):
+    """Serialize and encrypt report data for hidden form fields."""
+    raw = json.dumps({
+        "donations": [
+            {"name": d["name"], "amount": d["amount"],
+             "date": d["date"].isoformat()}
+            for d in donations
+        ],
+        "errors": errors,
+        "target": target,
+    }).encode("utf-8")
+    return _fernet().encrypt(raw).decode("ascii")
+
+
+def decode_payload(token):
+    """Decrypt and restore report data from a posted token."""
+    try:
+        data = json.loads(_fernet().decrypt(token.encode("ascii")))
+    except InvalidToken:
+        raise ValueError("Invalid payload")
+    donations = [
+        {"name": d["name"], "amount": float(d["amount"]),
+         "date": date.fromisoformat(d["date"])}
+        for d in data["donations"]
+    ]
+    return donations, data.get("errors", []), float(data.get("target", DEFAULT_TARGET))
 
 
 # ---------------------------------------------------------------------------
@@ -256,15 +300,26 @@ def build_pdf(stats, donations, show_details, chart_png):
 
 
 # ---------------------------------------------------------------------------
+# Report rendering helper
+# ---------------------------------------------------------------------------
+def render_report(donations, errors, target, show_details, standalone=False):
+    stats = compute_stats(donations, target)
+    png = make_chart_png(stats["daily"])
+    return render_template(
+        "report.html",
+        stats=stats,
+        donations=donations,
+        errors=errors,
+        show_details=show_details,
+        chart_b64=chart_base64(png),
+        payload=encode_payload(donations, errors, target),
+        standalone=standalone,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
-def _get_record():
-    token = session.get("report_token")
-    if not token:
-        return None
-    return STORE.get(token)
-
-
 @app.route("/", methods=["GET"])
 def index():
     return render_template("index.html", default_target=int(DEFAULT_TARGET))
@@ -289,56 +344,49 @@ def upload():
 
     donations, errors = parse_csv(file.stream)
     if not donations and errors:
-        # Nothing usable at all: show errors on the upload page.
         return render_template("index.html", default_target=int(DEFAULT_TARGET),
                                upload_error=None, errors=errors)
 
-    token = secrets.token_hex(16)
-    STORE[token] = {"donations": donations, "errors": errors, "target": target}
-    session["report_token"] = token
-    return redirect(url_for("report"))
+    # Privacy defaults to hidden; render the report directly (stateless).
+    return render_report(donations, errors, target, show_details=False)
 
 
-@app.route("/report", methods=["GET"])
+@app.route("/report", methods=["GET", "POST"])
 def report():
-    record = _get_record()
-    if record is None:
+    if request.method == "GET":
+        # No server-side state: a bare GET has nothing to show.
+        from flask import redirect, url_for
         return redirect(url_for("index"))
-    show_details = request.args.get("details") == "shown"
-    stats = compute_stats(record["donations"], record["target"])
-    png = make_chart_png(stats["daily"])
-    return render_template(
-        "report.html",
-        stats=stats,
-        donations=record["donations"],
-        errors=record["errors"],
-        show_details=show_details,
-        chart_b64=chart_base64(png),
-    )
+    payload = request.form.get("payload", "")
+    try:
+        donations, errors, target = decode_payload(payload)
+    except (ValueError, KeyError):
+        abort(400)
+    show_details = request.form.get("details") == "shown"
+    return render_report(donations, errors, target, show_details)
 
 
-@app.route("/download", methods=["GET"])
+@app.route("/download", methods=["POST"])
 def download():
-    record = _get_record()
-    if record is None:
-        return redirect(url_for("index"))
-    fmt = request.args.get("format", "pdf")
-    show_details = request.args.get("details") == "shown"
-    stats = compute_stats(record["donations"], record["target"])
-    png = make_chart_png(stats["daily"])
+    payload = request.form.get("payload", "")
+    try:
+        donations, errors, target = decode_payload(payload)
+    except (ValueError, KeyError):
+        abort(400)
+    fmt = request.form.get("format", "pdf")
+    show_details = request.form.get("details") == "shown"
 
     if fmt == "html":
-        html = render_template(
-            "report.html", stats=stats, donations=record["donations"],
-            errors=record["errors"], show_details=show_details,
-            chart_b64=chart_base64(png), standalone=True,
-        )
+        html = render_report(donations, errors, target, show_details,
+                             standalone=True)
         return send_file(io.BytesIO(html.encode("utf-8")),
                          mimetype="text/html", as_attachment=True,
                          download_name="donation-report.html")
 
     if fmt == "pdf":
-        pdf_bytes = build_pdf(stats, record["donations"], show_details, png)
+        stats = compute_stats(donations, target)
+        png = make_chart_png(stats["daily"])
+        pdf_bytes = build_pdf(stats, donations, show_details, png)
         return send_file(io.BytesIO(pdf_bytes),
                          mimetype="application/pdf", as_attachment=True,
                          download_name="donation-report.pdf")
@@ -346,6 +394,8 @@ def download():
     abort(400)
 
 
+# Vercel serverless entrypoint: the Python runtime picks up `app`.
+# Local dev entrypoint:
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
