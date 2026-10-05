@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Donation Report: TechAbout Foundation</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="container">
+  <h1>Donation Report</h1>
+  <p class="muted">TechAbout Foundation. Generated from your uploaded CSV.</p>
+
+  <div class="stats">
+    <div class="stat"><span class="label">Total collected</span><span class="value">{{ "%.2f"|format(stats.total) }}</span></div>
+    <div class="stat"><span class="label">Contributors</span><span class="value">{{ stats.count }}</span></div>
+    <div class="stat"><span class="label">Average</span><span class="value">{{ "%.2f"|format(stats.average) }}</span></div>
+    <div class="stat"><span class="label">Target</span><span class="value">{{ "%.2f"|format(stats.target) }}</span></div>
+  </div>
+
+  <div class="progress-wrap">
+    <div class="progress-label">Progress toward target: {{ "%.1f"|format(stats.progress) }}%</div>
+    <div class="progress"><div class="bar" style="width: {{ [stats.progress, 100]|min }}%"></div></div>
+  </div>
+
+  <h2>Contributions per day</h2>
+  <img src="data:image/png;base64,{{ chart_b64 }}" alt="Daily contributions chart" class="chart">
+
+  <h2>Contributors
+    {% if not standalone %}
+    <span class="toggle">
+      {% if show_details %}
+      <a href="{{ url_for('report') }}">Hide names and amounts</a>
+      {% else %}
+      <a href="{{ url_for('report', details='shown') }}">Show names and amounts</a>
+      {% endif %}
+    </span>
+    {% endif %}
+  </h2>
+  {% if not show_details %}
+  <p class="muted">Privacy mode is on: names and amounts are hidden.</p>
+  {% endif %}
+  <table>
+    <tr><th>{{ "Name" if show_details else "Donor" }}</th><th>Amount</th><th>Date</th></tr>
+    {% for d in donations %}
+    <tr>
+      <td>{{ d.name if show_details else "Donor " ~ loop.index }}</td>
+      <td>{{ "%.2f"|format(d.amount) if show_details else "Hidden" }}</td>
+      <td>{{ d.date.isoformat() }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  {% if errors %}
+  <h2>Skipped rows ({{ errors|length }})</h2>
+  <ul>
+    {% for e in errors %}
+    <li>Row {{ e.row }}: {{ e.message }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if not standalone %}
+  <div class="actions">
+    <a class="btn" href="{{ url_for('download', format='pdf', details='shown' if show_details else 'hidden') }}">Download PDF</a>
+    <a class="btn" href="{{ url_for('download', format='html', details='shown' if show_details else 'hidden') }}">Download HTML</a>
+    <a class="btn secondary" href="{{ url_for('index') }}">Upload another file</a>
+  </div>
+  {% endif %}
+</div>
+</body>
+</html>
